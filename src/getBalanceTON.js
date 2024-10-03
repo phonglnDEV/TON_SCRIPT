@@ -1,71 +1,79 @@
-import axios from "axios";
-import fs from "fs";
-import readline from "readline";
-import dotenv from "dotenv";
-import pLimit from "p-limit";
+import axios from 'axios';
+import fs from 'fs';
+import readline from 'readline';
+import dotenv from 'dotenv';
+import pLimit from 'p-limit';
 
 dotenv.config();
 
-const limit = pLimit(Number(process.env.RPS));
+const RPS = Number(process.env.RPS) || 100;  
+const TOTAL_ACCOUNTS = Number(process.env.ACCOUNTS) || 1000;
+const API_URL = process.env.API_URL || 'https://ton-rpc.subwallet.app/getAddressBalance?address=';
+const ACCOUNT_SOURCE = process.env.ACCOUNT_SOURCE || './accounts.txt'; 
+const limit = pLimit(RPS);
 
-function getNineDecimals(number) {
+function formatToNineDecimals(number) {
   return Math.floor(number * 1e9) / 1e9;
 }
 
-async function sendRequest(index, apiGetBalance) {
+async function sendRequest(index, accountAddress) {
   try {
-    const response = await axios.get(apiGetBalance);
-    console.log("API: ", apiGetBalance);
-    console.log(
-      "BALANCE: ",
-      getNineDecimals(response.data.result / 1000000000)
-    );
+    const response = await axios.get(`${API_URL}${accountAddress}`);
+    if(response.status != 200) {
+        console.log(response.statusText);
+      }
+  //   else{
+  //   const balance = formatToNineDecimals(response.data.result / 1e9);
+  //   console.log(`Request #${index} - Account: ${accountAddress}, Balance: ${balance}`);
+  // }
   } catch (error) {
-    console.error(`Request ${index} failed: ${error}`);
+    console.error(`Request #${index} failed: ${error}`);
   }
 }
 
-async function stressTest(batchAccount) {
-  const promises = [];
-  for (let i = 0; i < batchAccount.length; i++) {
-    promises.push(limit(() => sendRequest(i, batchAccount[i])));
-  }
+async function processBatch(batchAccounts, batchNumber) {
+  console.log(`Processing batch #${batchNumber}`);
+  const promises = batchAccounts.map((account, index) =>
+    limit(() => sendRequest(index, account))
+  );
   await Promise.all(promises);
+  console.log(`Batch #${batchNumber} processed.`);
 }
 
-async function getAccount() {
-  console.log("START STRESS TEST");
-  const fileStream = fs.createReadStream(process.env.ACCOUNT_SOURCE);
-  const apiGetBalance =
-    "https://ton-rpc.subwallet.app/getAddressBalance?address=";
-  const rl = readline.createInterface({
-    input: fileStream,
-    crlfDelay: Infinity,
-  });
-  let breakBatch = 0;
-  let batchAccounts = [];
+async function startStressTest() {
+  console.log("Starting stress test...");
 
-  for await (const line of rl) {
-    batchAccounts.push(apiGetBalance + line);
-    breakBatch++;
-    console.log("COUNT: ", breakBatch);
+  const fileStream = fs.createReadStream(ACCOUNT_SOURCE);
+  const rl = readline.createInterface({ input: fileStream, crlfDelay: Infinity });
 
-    if (breakBatch % process.env.RPS === 0) {
-      await stressTest(batchAccounts);
-      batchAccounts = [];
-    }
+  const accountAddresses = [];
+  let lineCount = 0;
 
-    if (breakBatch == process.env.ACCOUNTS) break;
+  for await (const accountAddress of rl) {
+    accountAddresses.push(accountAddress);
+    lineCount++;
     
+    if (lineCount >= TOTAL_ACCOUNTS) {
+      break;
+    }
   }
 
-  if (batchAccounts.length > 0) {
-    console.log('Processing remaining batch...');
-    await stressTest(batchAccounts);
-  }
-  console.log("Stress test completed.");
+  const totalAccounts = accountAddresses.length;
+  console.log(`Total accounts loaded: ${totalAccounts}`);
+
+  let currentIndex = 0;
+  const interval = setInterval(async () => {
+    if (currentIndex < totalAccounts) {
+      const batchAccounts = accountAddresses.slice(currentIndex, currentIndex + RPS);
+      await processBatch(batchAccounts, Math.floor(currentIndex / RPS) + 1);
+      currentIndex += RPS;
+    } else {
+      clearInterval(interval);
+      console.log("Stress test completed.");
+    }
+  }, 1000); 
 }
 
-getAccount().catch((error) => {
+startStressTest().catch((error) => {
   console.error("Error during stress test:", error);
 });
